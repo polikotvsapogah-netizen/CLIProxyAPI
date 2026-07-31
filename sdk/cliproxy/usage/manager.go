@@ -32,6 +32,8 @@ type Record struct {
 	AccessTokenSHA256 string
 	AuthType          string
 	Source            string
+	ClientID          string
+	PoolID            string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
 	// ServiceTier stores the client-requested service tier.

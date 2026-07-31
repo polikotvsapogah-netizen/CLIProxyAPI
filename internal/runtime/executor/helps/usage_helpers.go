@@ -16,6 +16,7 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -31,6 +32,8 @@ type UsageReporter struct {
 	authMu          sync.RWMutex
 	accessTokenHash string
 	authType        string
+	clientID        string
+	poolID          string
 	apiKey          string
 	source          string
 	reasoning       string
@@ -80,6 +83,10 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
+		if auth.Attributes != nil {
+			reporter.clientID = strings.TrimSpace(auth.Attributes[cliproxyexecutor.ClientIDMetadataKey])
+			reporter.poolID = strings.TrimSpace(auth.Attributes[cliproxyexecutor.SelectedPoolMetadataKey])
+		}
 	}
 	return reporter
 }
@@ -292,6 +299,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AuthIndex:           r.authIndex,
 		AccessTokenSHA256:   r.accessTokenFingerprint(),
 		AuthType:            r.authType,
+		ClientID:            r.clientID,
+		PoolID:              r.poolID,
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),

@@ -16,7 +16,7 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
-	keys := normalizeKeys(cfg.APIKeys)
+	keys := normalizeKeys(cfg.AllProxyAPIKeys())
 	if len(keys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
@@ -24,16 +24,17 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.ClientAPIKeyMetadata()),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name       string
+	keys       map[string]struct{}
+	clientMeta map[string]sdkconfig.ClientAccess
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []string, clientMeta map[string]sdkconfig.ClientAccess) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +43,7 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, clientMeta: clientMeta}
 }
 
 func (p *provider) Identifier() string {
@@ -90,12 +91,19 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
+			metadata := map[string]string{
+				"source": candidate.source,
+			}
+			if client, okClient := p.clientMeta[candidate.value]; okClient {
+				metadata["client_id"] = client.ID
+				if client.Label != "" {
+					metadata["client_label"] = client.Label
+				}
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
+				Metadata:  metadata,
 			}, nil
 		}
 	}

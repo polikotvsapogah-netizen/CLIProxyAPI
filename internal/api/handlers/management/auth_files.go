@@ -358,6 +358,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 			entry["account"] = account
 		}
 	}
+	if pools := h.poolsForAuth(auth.ID); len(pools) > 0 {
+		entry["pools"] = pools
+	}
 	if !auth.CreatedAt.IsZero() {
 		entry["created_at"] = auth.CreatedAt
 	}
@@ -370,6 +373,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		entry["next_retry_after"] = auth.NextRetryAfter
+	}
+	if pausedUntil, ok := coreauth.AuthPauseUntil(auth); ok {
+		entry["paused_until"] = pausedUntil
+		entry["paused"] = pausedUntil.After(time.Now())
 	}
 	if path != "" {
 		entry["path"] = path
