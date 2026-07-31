@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -697,9 +698,8 @@ func applyClaudeHeadersWithNativeProfile(
 	applyCLIFingerprint := fp.ProfileClaudeCodeCLI || wirePolicy.Cloak
 	preserveCallerFingerprint := !applyCLIFingerprint && !confirmedClaudeCode
 	useOAuthBetas := fp.UseOAuthBetas
-	isAnthropicBase := isAnthropicUpstreamURL(r.URL)
 	if strings.TrimSpace(apiKey) != "" {
-		if isAnthropicBase && useAPIKey {
+		if useAPIKey {
 			r.Header.Del("Authorization")
 			r.Header.Set("x-api-key", apiKey)
 		} else {
@@ -716,6 +716,29 @@ func applyClaudeHeadersWithNativeProfile(
 		if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			incomingHeaders = ginCtx.Request.Header
 		}
+	}
+	if isCustomClaudeAPIKeyRequest(auth, r.URL) {
+		misc.EnsureHeader(r.Header, incomingHeaders, "Anthropic-Version", "2023-06-01")
+		if val := strings.TrimSpace(strings.Join(incomingHeaders.Values("Anthropic-Beta"), ",")); val != "" {
+			r.Header.Set("Anthropic-Beta", val)
+		}
+		if stream {
+			r.Header.Set("Accept", "text/event-stream")
+			r.Header.Set("Accept-Encoding", "identity")
+		} else {
+			r.Header.Set("Accept", "application/json")
+			r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+		}
+		var attrs map[string]string
+		if auth != nil {
+			attrs = auth.Attributes
+		}
+		util.ApplyCustomHeadersFromAttrs(r, attrs)
+		if stream {
+			r.Header.Set("Accept", "text/event-stream")
+			r.Header.Set("Accept-Encoding", "identity")
+		}
+		return nil
 	}
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
@@ -1025,6 +1048,51 @@ func applyClaudeWireHeaderCasing(r *http.Request) {
 		delete(r.Header, canonical)
 		r.Header[wire] = values
 	}
+}
+
+func claudeMessagesURL(baseURL string, auth *cliproxyauth.Auth, path string) string {
+	rawBase := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if rawBase == "" {
+		rawBase = "https://api.anthropic.com"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	out := rawBase + path
+	if isCustomClaudeAPIKeyBaseURL(auth, rawBase) {
+		return out
+	}
+	return out + "?beta=true"
+}
+
+func isCustomClaudeAPIKeyRequest(auth *cliproxyauth.Auth, reqURL *url.URL) bool {
+	if !isClaudeAPIKeyAuth(auth) || reqURL == nil {
+		return false
+	}
+	return !isOfficialAnthropicHost(reqURL.Host)
+}
+
+func isCustomClaudeAPIKeyBaseURL(auth *cliproxyauth.Auth, baseURL string) bool {
+	if !isClaudeAPIKeyAuth(auth) {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed == nil || strings.TrimSpace(parsed.Host) == "" {
+		return false
+	}
+	return !isOfficialAnthropicHost(parsed.Host)
+}
+
+func isClaudeAPIKeyAuth(auth *cliproxyauth.Auth) bool {
+	return auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
+}
+
+func isOfficialAnthropicHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = strings.ToLower(strings.TrimSpace(parsedHost))
+	}
+	return host == "api.anthropic.com"
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

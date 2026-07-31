@@ -29,7 +29,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := claudeMessagesURL(baseURL, auth, "/v1/messages")
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 	defer func() {
 		if cancelErr := newClaudeOAuthCancellationError(ctx, fp.OAuthCancellation, err); cancelErr != nil {
