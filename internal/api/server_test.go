@@ -1339,6 +1339,39 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	}
 }
 
+func TestManagementCustomPolikotRoutesRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	routes := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodGet, path: "/v0/management/account-pools"},
+		{method: http.MethodGet, path: "/v0/management/client-access"},
+		{method: http.MethodGet, path: "/v0/management/account-matrix"},
+		{method: http.MethodGet, path: "/v0/management/generic-secrets"},
+		{method: http.MethodGet, path: "/v0/management/codex-rate-limits"},
+		{method: http.MethodPatch, path: "/v0/management/auth-files/pause", body: `{}`},
+	}
+
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			req := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+			req.Header.Set("Authorization", "Bearer test-management-key")
+			if route.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code == http.StatusNotFound {
+				t.Fatalf("route %s %s returned 404; body=%s", route.method, route.path, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestManagementPluginsRouteRegistered(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
