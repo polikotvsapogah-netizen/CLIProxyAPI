@@ -55,6 +55,7 @@ _bmad/*
 _bmad-output/*
 .gocache/
 .gitnexus/
+graphify-out/
 
 # macOS
 .DS_Store
