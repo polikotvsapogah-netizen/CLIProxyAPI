@@ -174,6 +174,95 @@ func assertClaudeCountTokensIdentity(t *testing.T, body []byte, headers http.Hea
 	}
 }
 
+func TestClaudeAPIKeyAuthUsesXAPIKeyForCustomAnthropicBaseURL(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	auth := &cliproxyauth.Auth{
+		ID: "custom-anthropic-compatible",
+		Attributes: map[string]string{
+			"api_key":  "test-api-key",
+			"base_url": "https://example.invalid/custom",
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "https://example.invalid/custom/v1/messages", nil)
+	if err := NewClaudeExecutor(&config.Config{}).PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest error: %v", err)
+	}
+	if got := req.Header.Get("x-api-key"); got != "test-api-key" {
+		t.Fatalf("PrepareRequest x-api-key = %q, want %q", got, "test-api-key")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("PrepareRequest Authorization = %q, want empty", got)
+	}
+
+	headerReq := newClaudeHeaderTestRequest(t, http.Header{})
+	headerReq.URL.Scheme = "https"
+	headerReq.URL.Host = "example.invalid"
+	if err := applyClaudeHeaders(headerReq, auth, "test-api-key", false, nil, nil, &config.Config{}, nil, false); err != nil {
+		t.Fatalf("applyClaudeHeaders error: %v", err)
+	}
+	if got := headerReq.Header.Get("x-api-key"); got != "test-api-key" {
+		t.Fatalf("applyClaudeHeaders x-api-key = %q, want %q", got, "test-api-key")
+	}
+	if got := headerReq.Header.Get("Authorization"); got != "" {
+		t.Fatalf("applyClaudeHeaders Authorization = %q, want empty", got)
+	}
+	if got := headerReq.Header.Get("Anthropic-Beta"); got != "" {
+		t.Fatalf("applyClaudeHeaders Anthropic-Beta = %q, want empty for custom Anthropic-compatible API key base URL", got)
+	}
+	if got := headerReq.Header.Get("X-Claude-Code-Session-Id"); got != "" {
+		t.Fatalf("applyClaudeHeaders X-Claude-Code-Session-Id = %q, want empty for custom Anthropic-compatible API key base URL", got)
+	}
+}
+
+func TestClaudeAPIKeyCustomAnthropicBaseURLPreservesPathWithoutBetaQuery(t *testing.T) {
+	var seenPath string
+	var seenQuery string
+	var seenBeta string
+	var seenAPIKey string
+	var seenAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenQuery = r.URL.RawQuery
+		seenBeta = r.Header.Get("Anthropic-Beta")
+		seenAPIKey = r.Header.Get("x-api-key")
+		seenAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4-6-high","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-api-key",
+		"base_url": server.URL + "/custom",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6-high",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"ping"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if seenPath != "/custom/v1/messages" {
+		t.Fatalf("path = %q, want /custom/v1/messages", seenPath)
+	}
+	if seenQuery != "" {
+		t.Fatalf("query = %q, want empty for custom Anthropic-compatible API key base URL", seenQuery)
+	}
+	if seenBeta != "" {
+		t.Fatalf("Anthropic-Beta = %q, want empty for custom Anthropic-compatible API key base URL", seenBeta)
+	}
+	if seenAPIKey != "test-api-key" {
+		t.Fatalf("x-api-key = %q, want test-api-key", seenAPIKey)
+	}
+	if seenAuthorization != "" {
+		t.Fatalf("Authorization = %q, want empty", seenAuthorization)
+	}
+}
+
 func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true

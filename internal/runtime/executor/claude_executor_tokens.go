@@ -124,7 +124,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
+	url := claudeMessagesURL(baseURL, auth, "/v1/messages/count_tokens")
 	oauthToken := isClaudeOAuthToken(apiKey)
 
 	from := opts.SourceFormat

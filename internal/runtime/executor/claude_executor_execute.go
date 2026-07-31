@@ -27,7 +27,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := claudeMessagesURL(baseURL, auth, "/v1/messages")
 	oauthToken := isClaudeOAuthToken(apiKey)
 	cchSigning := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, url)
 
