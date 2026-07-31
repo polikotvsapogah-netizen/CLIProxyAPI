@@ -51,6 +51,15 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// AccountPools groups OAuth/file-backed auth IDs into operator-defined pools.
+	AccountPools []AccountPool `yaml:"account-pools,omitempty" json:"account-pools,omitempty"`
+
+	// ClientAccess maps downstream client keys to account pools and generic secrets.
+	ClientAccess []ClientAccess `yaml:"client-access,omitempty" json:"client-access,omitempty"`
+
+	// GenericSecrets stores non-LLM service secrets managed by the same control plane.
+	GenericSecrets []GenericSecret `yaml:"generic-secrets,omitempty" json:"generic-secrets,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

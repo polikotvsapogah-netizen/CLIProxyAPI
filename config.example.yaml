@@ -41,6 +41,28 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Scoped account routing for downstream agents.
+# auth_ids are the stable IDs from GET /v0/management/auth-files.
+account-pools:
+  - id: "codex-main"
+    label: "Codex Main"
+    provider: "codex"
+    auth_ids: []
+
+# Agent-specific client keys. A client can see only its allowed pools/secrets.
+client-access:
+  - id: "ogod"
+    label: "oGod"
+    api_keys:
+      - "sk-client-ogod"
+    allowed_pools:
+      - "codex-main"
+    allowed_secrets: []
+
+# Non-LLM service secrets managed by the same control plane.
+# Set CLI_PROXY_SECRETS_KEY before writing encrypted values via the dashboard/API.
+generic-secrets: []
+
 # Enable debug logging
 debug: false
 

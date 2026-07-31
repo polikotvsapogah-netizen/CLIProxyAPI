@@ -19,6 +19,10 @@ type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
 type PayloadModelRule = internalconfig.PayloadModelRule
+type AccountPool = internalconfig.AccountPool
+type ClientAccess = internalconfig.ClientAccess
+type GenericSecret = internalconfig.GenericSecret
+type RouteAccessSnapshot = internalconfig.RouteAccessSnapshot
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey

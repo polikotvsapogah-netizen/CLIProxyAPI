@@ -1185,3 +1185,44 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresNamespaceFuncti
 		t.Fatalf("non-stream output namespace = %q, want mcp__node_repl", got)
 	}
 }
+
+func TestConvertClaudeResponseToOpenAIResponses_CompletedOutputPreservesBlockOrder(t *testing.T) {
+	in := []string{
+		`data: {"type":"message_start","message":{"id":"msg_claude_2","type":"message","role":"assistant","model":"claude-test","content":[],"usage":{"input_tokens":3,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"x\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"message_stop"}`,
+	}
+
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, []byte(line), &param)...)
+	}
+
+	for _, chunk := range out {
+		ev, data := parseClaudeResponsesSSEEvent(t, chunk)
+		if ev != "response.completed" {
+			continue
+		}
+		if got := data.Get("response.output.0.type").String(); got != "function_call" {
+			t.Fatalf("completed output[0].type = %q, want function_call", got)
+		}
+		if got := data.Get("response.output.0.name").String(); got != "lookup" {
+			t.Fatalf("completed output[0].name = %q, want lookup", got)
+		}
+		if got := data.Get("response.output.1.type").String(); got != "message" {
+			t.Fatalf("completed output[1].type = %q, want message", got)
+		}
+		if got := data.Get("response.output.1.content.0.text").String(); got != "answer" {
+			t.Fatalf("completed output[1] text = %q, want answer", got)
+		}
+		return
+	}
+
+	t.Fatal("missing response.completed event")
+}
