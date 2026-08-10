@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -1066,33 +1065,34 @@ func claudeMessagesURL(baseURL string, auth *cliproxyauth.Auth, path string) str
 }
 
 func isCustomClaudeAPIKeyRequest(auth *cliproxyauth.Auth, reqURL *url.URL) bool {
-	if !isClaudeAPIKeyAuth(auth) || reqURL == nil {
+	if !isConfiguredCustomClaudeAPIKey(auth) || reqURL == nil {
 		return false
 	}
-	return !isOfficialAnthropicHost(reqURL.Host)
+	return !isAnthropicUpstreamURL(reqURL)
 }
 
 func isCustomClaudeAPIKeyBaseURL(auth *cliproxyauth.Auth, baseURL string) bool {
-	if !isClaudeAPIKeyAuth(auth) {
+	if !isConfiguredCustomClaudeAPIKey(auth) {
 		return false
 	}
-	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || parsed == nil || strings.TrimSpace(parsed.Host) == "" {
-		return false
-	}
-	return !isOfficialAnthropicHost(parsed.Host)
+	return !isAnthropicUpstreamBase(baseURL)
 }
 
 func isClaudeAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 	return auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
 }
 
-func isOfficialAnthropicHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = strings.ToLower(strings.TrimSpace(parsedHost))
+func isConfiguredCustomClaudeAPIKey(auth *cliproxyauth.Auth) bool {
+	if !isClaudeAPIKeyAuth(auth) {
+		return false
 	}
-	return host == "api.anthropic.com"
+	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+	if isClaudeOAuthToken(apiKey) {
+		return false
+	}
+	source := strings.TrimSpace(auth.Attributes["source"])
+	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	return strings.HasPrefix(source, "config:claude[") && baseURL != "" && !isAnthropicUpstreamBase(baseURL)
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
