@@ -48,6 +48,21 @@ Keep Polikot changes as explicit commits on top of upstream:
    - identifies custom gateways from synthesized `config:claude[...]` credentials
    - preserves the upstream Claude Code 2.1.220 OAuth and official API-key identity path
    - prevents OAuth-looking credentials and test transports from being treated as custom gateways
+5. `ops/polikot/` keeps the account-pool reconcile job under version control:
+   - every new auth file is added to every enabled pool for its provider
+   - `WatchPaths` provides immediate sync when launchd delivers the event
+   - `StartInterval=300` is the fallback when the filesystem event is missed
+   - unit tests lock down additive, provider-scoped and idempotent behavior
+
+Deploy this operational overlay after an upstream upgrade:
+
+```bash
+install -m 755 ops/polikot/sync_auth_pools.py /Users/aipolikot/myai/RoutingMainKeys/scripts/sync_auth_pools.py
+cp ops/polikot/com.cliproxyapi.pool-sync.plist /Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/launchd/com.cliproxyapi.pool-sync.plist
+cp ops/polikot/com.cliproxyapi.pool-sync.plist /Users/aipolikot/Library/LaunchAgents/com.cliproxyapi.pool-sync.plist
+launchctl bootout gui/$UID/com.cliproxyapi.pool-sync || true
+launchctl bootstrap gui/$UID /Users/aipolikot/Library/LaunchAgents/com.cliproxyapi.pool-sync.plist
+```
 
 Future custom fixes should be separate commits with `polikot` in the subject when they are
 part of the local overlay.
