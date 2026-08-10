@@ -3,15 +3,17 @@
 This repository is kept as a **clean upstream + Polikot overlay**.  Do not upgrade by
 pulling upstream into a dirty working tree.
 
-## Current upgrade baseline
+## Current production baseline
 
-- Upstream baseline: `origin/main` tag `v7.2.111` (commit `4a315136`).
-- Polikot upgrade branch: `polikot/full-v7-upgrade-20260731_104704`.
-- Production remains on the previous build until the verification and deploy steps below pass:
-  - version: `v7.2.67-polikot`
-  - commit: `6106620f7dcd`
+- Upstream baseline: `origin/main` tag `v7.2.127` (commit `ecc9aa72`).
+- Polikot upgrade branch: `polikot/full-v7.2.127-upgrade-20260810_174201`.
+- Production build metadata after the 2026-08-10 deploy:
+  - version: `v7.2.127-polikot`
+  - commit: `40a25a088a79`
 - Pre-upgrade rollback snapshot:
-  `/Users/aipolikot/myai/RoutingMainKeys/backups/pre-full-upgrade-20260731_104704`.
+  `/Users/aipolikot/myai/RoutingMainKeys/backups/pre-upgrade-20260810_174201`.
+- Previous production binary:
+  `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.111-pre-v7.2.127-20260810_174201`.
 - Note: production runs with `-local-model`, so the model registry is frozen at build
   time (embedded `internal/registry/models/models.json`). New upstream models (e.g.
   `grok-4.5`) only appear after rebuilding and redeploying from a newer baseline.
@@ -22,13 +24,13 @@ pulling upstream into a dirty working tree.
 
 Keep Polikot changes as explicit commits on top of upstream:
 
-1. `2b228c92 chore(polikot): replay local customizations on v7.2.111`
+1. `7593613c chore(polikot): replay local customizations on v7.2.111`
    - account pools / client access / generic secrets config
    - pool-aware routing metadata and selectors
    - auth file pause support
    - legacy in-memory usage statistics for the dashboard
    - Codex rate-limit management endpoint
-2. `a710b88c fix(polikot): register custom management routes after v7.2.111 upgrade`
+2. `5b69a8c9 fix(polikot): register custom management routes after v7.2.111 upgrade`
    - registers `/v0/management/account-pools`
    - registers `/v0/management/client-access`
    - registers `/v0/management/account-matrix`
@@ -36,12 +38,16 @@ Keep Polikot changes as explicit commits on top of upstream:
    - registers `/v0/management/codex-rate-limits`
    - registers `/v0/management/auth-files/pause`
    - includes a regression test that these routes do not return 404
-3. `f4118c3c feat(polikot): preserve custom Claude API-key base URLs`
+3. `f7e8a5f9 feat(polikot): preserve custom Claude API-key base URLs`
    - uses `x-api-key` for Anthropic-compatible API-key endpoints
    - preserves custom base paths
    - avoids forcing the official `?beta=true` query and Claude OAuth fingerprint
      headers onto custom gateways
    - covers both request preparation and end-to-end executor behavior
+4. `ba43e344 fix(polikot): keep custom Claude routing explicit`
+   - identifies custom gateways from synthesized `config:claude[...]` credentials
+   - preserves the upstream Claude Code 2.1.220 OAuth and official API-key identity path
+   - prevents OAuth-looking credentials and test transports from being treated as custom gateways
 
 Future custom fixes should be separate commits with `polikot` in the subject when they are
 part of the local overlay.
