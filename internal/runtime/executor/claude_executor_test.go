@@ -182,6 +182,7 @@ func TestClaudeAPIKeyAuthUsesXAPIKeyForCustomAnthropicBaseURL(t *testing.T) {
 		Attributes: map[string]string{
 			"api_key":  "test-api-key",
 			"base_url": "https://example.invalid/custom",
+			"source":   "config:claude[test]",
 		},
 	}
 
@@ -237,6 +238,7 @@ func TestClaudeAPIKeyCustomAnthropicBaseURLPreservesPathWithoutBetaQuery(t *test
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"api_key":  "test-api-key",
 		"base_url": server.URL + "/custom",
+		"source":   "config:claude[test]",
 	}}
 
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
