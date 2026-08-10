@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cliproxyapi.pool-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/aipolikot/myai/RoutingMainKeys/scripts/sync_auth_pools.py</string>
+    </array>
+    <key>WatchPaths</key>
+    <array>
+        <string>/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/auth</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/launchd-logs/pool-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/launchd-logs/pool-sync.log</string>
+</dict>
+</plist>
