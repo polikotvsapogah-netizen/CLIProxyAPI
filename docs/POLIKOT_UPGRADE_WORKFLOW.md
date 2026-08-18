@@ -7,16 +7,22 @@ pulling upstream into a dirty working tree.
 
 - Upstream baseline: `origin/main` tag `v7.2.127` (commit `ecc9aa72`).
 - Polikot upgrade branch: `polikot/full-v7.2.127-upgrade-20260810_174201`.
-- Production build metadata after the 2026-08-10 deploy:
+- Production build metadata after the 2026-08-19 deploy:
   - version: `v7.2.127-polikot`
-  - commit: `40a25a088a79`
+  - commit: `9a094fabebd9` (adds `grok-4.6` to the embedded catalog)
 - Pre-upgrade rollback snapshot:
   `/Users/aipolikot/myai/RoutingMainKeys/backups/pre-upgrade-20260810_174201`.
-- Previous production binary:
-  `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.111-pre-v7.2.127-20260810_174201`.
+- Previous production binaries:
+  - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.127-polikot-pre-grok46-20260819_044037`
+    (the 2026-08-10 build, rollback for the `grok-4.6` deploy)
+  - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.111-pre-v7.2.127-20260810_174201`
 - Note: production runs with `-local-model`, so the model registry is frozen at build
-  time (embedded `internal/registry/models/models.json`). New upstream models (e.g.
-  `grok-4.5`) only appear after rebuilding and redeploying from a newer baseline.
+  time (embedded `internal/registry/models/models.json`). New upstream models only
+  appear after the catalog entry is copied into that file and the binary is rebuilt and
+  redeployed. `grok-4.6` reached production this way on 2026-08-19: the catalog entry
+  comes verbatim from
+  `https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json`,
+  and until the rebuild every call answered `400 unknown provider for model grok-4.6`.
 - Runtime binary: `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi`.
 - Runtime config and OAuth state are **not** committed to this repository.
 
