@@ -248,7 +248,7 @@ func (h *Handler) fetchCodexRateLimit(ctx context.Context, auth *coreauth.Auth) 
 		}
 	}
 
-	token, err := h.resolveTokenForAuth(ctx, auth)
+	token, err := h.resolveTokenForAuth(ctx, auth, "")
 	if err != nil || strings.TrimSpace(token) == "" {
 		out.ProxyStatus = "token_missing"
 		if err != nil {
@@ -280,7 +280,7 @@ func (h *Handler) fetchCodexRateLimit(ctx context.Context, auth *coreauth.Auth) 
 	req.Close = true
 	req.Header.Set("Connection", "close")
 
-	transport := h.apiCallTransport(auth)
+	transport := h.apiCallTransport(auth, "")
 	if t, ok := transport.(*http.Transport); ok && t != nil {
 		t = t.Clone()
 		t.DisableKeepAlives = true
