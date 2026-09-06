@@ -7,22 +7,31 @@ pulling upstream into a dirty working tree.
 
 - Upstream baseline: `origin/main` tag `v7.2.127` (commit `ecc9aa72`).
 - Polikot upgrade branch: `polikot/full-v7.2.127-upgrade-20260810_174201`.
-- Production build metadata after the 2026-08-19 deploy:
+- Production build metadata after the 2026-09-07 deploy:
   - version: `v7.2.127-polikot`
-  - commit: `9a094fabebd9` (adds `grok-4.6` to the embedded catalog)
+  - commit: `aa88bb128c83` (adds `gpt-6-astra` to the embedded catalogs)
 - Pre-upgrade rollback snapshot:
   `/Users/aipolikot/myai/RoutingMainKeys/backups/pre-upgrade-20260810_174201`.
 - Previous production binaries:
+  - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.127-polikot-pre-astra-20260907_054306`
+    (the 2026-08-19 build, rollback for the `gpt-6-astra` deploy)
   - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.127-polikot-pre-grok46-20260819_044037`
     (the 2026-08-10 build, rollback for the `grok-4.6` deploy)
   - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.111-pre-v7.2.127-20260810_174201`
 - Note: production runs with `-local-model`, so the model registry is frozen at build
-  time (embedded `internal/registry/models/models.json`). New upstream models only
-  appear after the catalog entry is copied into that file and the binary is rebuilt and
-  redeployed. `grok-4.6` reached production this way on 2026-08-19: the catalog entry
-  comes verbatim from
-  `https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json`,
-  and until the rebuild every call answered `400 unknown provider for model grok-4.6`.
+  time (embedded `internal/registry/models/models.json` and
+  `internal/registry/models/codex_client_models.json`). New upstream models only
+  appear after the catalog entry is copied into those files and the binary is rebuilt and
+  redeployed. Both entries come verbatim from
+  `https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/`.
+  - `grok-4.6` reached production this way on 2026-08-19; until the rebuild every call
+    answered `400 unknown provider for model grok-4.6`.
+  - `gpt-6-astra` reached production this way on 2026-09-07 (HQ#809). The codex CLI had
+    been defaulting to it for weeks (`~/.codex/config.toml`), but the router served only
+    up to `gpt-5.6`, so no HTTP consumer could reach it. Added to `codex-team`,
+    `codex-plus` and `codex-pro` — upstream does not sell it on `codex-free`.
+    Live smoke after the deploy: `gpt-6-astra` answered in 4.3 s through client key
+    `ogod`, and `ogod` / `openclaw-main` / `openclaw-foxy` / `hermesops` all kept working.
 - Runtime binary: `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi`.
 - Runtime config and OAuth state are **not** committed to this repository.
 
