@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -88,5 +89,34 @@ func TestAntigravityInstantRetry429BehaviorUnchanged(t *testing.T) {
 	}
 	if got := hits.Load(); got != 4 {
 		t.Fatalf("instant retry 429 upstream calls = %d, want 4 (3 primary attempts + final fallback)", got)
+	}
+}
+
+// HQ#1104 review R2: a RESOURCE_EXHAUSTED refusal carrying a RetryInfo
+// retryDelay but no ErrorInfo reason keeps the pre-HQ#1104 soft-retry
+// recovery instead of being classified as a drained quota.
+func TestAntigravityRetryHintWithoutReasonKeepsSoftRetry(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+	body := []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Resource has been exhausted","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0.01s"}]}}`)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write(body)
+			return
+		}
+		_, _ = w.Write(antigravitySuccessBody())
+	}))
+	defer srv.Close()
+	useAntigravityCooldownFallbackOrder(t, func(string) []string {
+		return []string{srv.URL}
+	})
+
+	req, opts := antigravityCooldownTestRequest(antigravityCooldownTestModel)
+	_, err := NewAntigravityExecutor(&config.Config{RequestRetry: 1}).Execute(context.Background(), antigravityCooldownTestAuth("hq1104-retry-hint"), req, opts)
+	decision := decideAntigravity429(body)
+	if err != nil {
+		t.Fatalf("retry-hinted 429 lost existing recovery: kind=%s retryAfter=%v upstream calls=%d err=%v; want success on second call", decision.kind, *decision.retryAfter, hits.Load(), err)
 	}
 }

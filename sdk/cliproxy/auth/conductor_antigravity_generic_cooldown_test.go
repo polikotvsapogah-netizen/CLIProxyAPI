@@ -4,7 +4,11 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 const antigravityGenericExhaustedTestBody = `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota)","status":"RESOURCE_EXHAUSTED"}}`
@@ -113,5 +117,111 @@ func TestMarkResultNonAntigravityGenericBodyKeepsLadder(t *testing.T) {
 	}
 	if remaining := time.Until(state.ModelStates["gpt-5"].Quota.NextRecoverAt); remaining >= 60*time.Second {
 		t.Fatalf("non-antigravity cooldown = %v, want below the 60s floor", remaining)
+	}
+}
+
+// HQ#1104 review R2: an auth-level result carrying a retry hint must keep the
+// short hint cooldown; the generic exhausted floor must not be applied on top
+// of a recognized RetryAfter.
+func TestMarkResultAuthRetryHintKeepsShortCooldown(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+
+	hint := 2 * time.Second
+
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "hq1104-auth-hint", Provider: "antigravity"}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register returned error: %v", errRegister)
+	}
+
+	result := antigravityGenericExhaustedResult(auth.ID, "")
+	result.Error.Message = `{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"2s"}]}}`
+	result.RetryAfter = &hint
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), result)
+	after := time.Now()
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth state after retry-hinted 429")
+	}
+	if updated.Quota.NextRecoverAt.Before(before.Add(hint)) || updated.Quota.NextRecoverAt.After(after.Add(hint)) {
+		t.Fatalf("auth retry-hint cooldown = %v, want %v", updated.Quota.NextRecoverAt.Sub(before), hint)
+	}
+	blocked, _, next := isAuthBlockedForModel(updated, "", before.Add(hint-time.Second))
+	if !blocked {
+		t.Fatal("selector did not block before the retry-hint deadline")
+	}
+	blocked, _, _ = isAuthBlockedForModel(updated, "", next.Add(time.Nanosecond))
+	if blocked {
+		t.Fatal("selector blocked after the retry-hint deadline")
+	}
+}
+
+// HQ#1104 review R1: a request arriving inside the tail of a generic exhausted
+// cooldown must be refused immediately, not parked in the external retry loop
+// until the 60s floor expires. Synctest advances the virtual clock 40s into
+// the window, leaving ~20s of cooldown — under the old policy the client wait.
+func TestAntigravityGenericCooldownTailDoesNotWait(t *testing.T) {
+	const tailModel = "hq1104-tail-model"
+	for _, mode := range []string{"execute", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				withQuotaCooldownEnabled(t)
+				manager := NewManager(nil, nil, nil)
+				manager.SetRetryConfig(2, 30*time.Second, 0)
+				e := &authFallbackExecutor{id: "antigravity", executeErrors: map[string]error{}, streamFirstErrors: map[string]error{}}
+				manager.RegisterExecutor(e)
+				for _, id := range []string{"hq1104-tail-a", "hq1104-tail-b"} {
+					registry.GetGlobalRegistry().RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: tailModel, Object: "model", OwnedBy: "antigravity"}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+					if _, err := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: id, Provider: "antigravity"}); err != nil {
+						t.Fatal(err)
+					}
+					err := &Error{Message: antigravityGenericExhaustedTestBody, HTTPStatus: http.StatusTooManyRequests}
+					e.executeErrors[id] = err
+					e.streamFirstErrors[id] = err
+				}
+				req := cliproxyexecutor.Request{Model: tailModel}
+				invoke := func() error {
+					if mode == "stream" {
+						result, err := manager.ExecuteStream(context.Background(), []string{"antigravity"}, req, cliproxyexecutor.Options{})
+						if err != nil {
+							return err
+						}
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								return chunk.Err
+							}
+						}
+						return nil
+					}
+					_, err := manager.Execute(context.Background(), []string{"antigravity"}, req, cliproxyexecutor.Options{})
+					return err
+				}
+				if err := invoke(); err == nil {
+					t.Fatal("expected initial generic refusal")
+				}
+				// Advance into the final ~20 seconds of the 60s cooldown.
+				time.Sleep(40 * time.Second)
+				started := time.Now()
+				err := invoke()
+				elapsed := time.Since(started)
+				calls := len(e.ExecuteCalls())
+				if mode == "stream" {
+					calls = len(e.StreamCalls())
+				}
+				if err == nil {
+					t.Fatal("expected the second request to be refused during the cooldown tail")
+				}
+				if elapsed > 3*time.Second {
+					t.Fatalf("artificial cooldown wait=%s; want refusal <=3s", elapsed)
+				}
+				if calls != 2 {
+					t.Fatalf("total executor calls=%d, want 2 (first request only; second refused locally)", calls)
+				}
+			})
+		})
 	}
 }
