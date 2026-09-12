@@ -854,9 +854,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
-				if floored := antigravityGenericExhaustedCooldownFloor(result.Provider, result.Error, auth.Quota.NextRecoverAt, now); !floored.Equal(auth.Quota.NextRecoverAt) {
-					auth.Quota.NextRecoverAt = floored
-					auth.NextRetryAfter = floored
+				if result.RetryAfter == nil {
+					if floored := antigravityGenericExhaustedCooldownFloor(result.Provider, result.Error, auth.Quota.NextRecoverAt, now); !floored.Equal(auth.Quota.NextRecoverAt) {
+						auth.Quota.NextRecoverAt = floored
+						auth.NextRetryAfter = floored
+					}
 				}
 			}
 		}
@@ -1744,6 +1746,13 @@ func isAntigravityGenericExhaustedResult(provider string, resultErr *Error) bool
 	details := gjson.GetBytes([]byte(body), "error.details")
 	if details.Exists() && details.IsArray() {
 		for _, detail := range details.Array() {
+			if detail.Get("@type").String() == "type.googleapis.com/google.rpc.RetryInfo" && detail.Get("retryDelay").String() != "" {
+				// A retry hint keeps the short soft-retry path; the refusal is
+				// not a generic exhausted one (HQ#1104 review R2).
+				return false
+			}
+		}
+		for _, detail := range details.Array() {
 			if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
 				continue
 			}
@@ -1774,6 +1783,36 @@ func antigravityGenericExhaustedCooldownFloor(provider string, resultErr *Error,
 		return floor
 	}
 	return next
+}
+
+// antigravityGenericExhaustedAuthBlock reports whether the active cooldown for
+// this auth and model was produced by a generic Antigravity exhausted 429
+// (HQ#1104). It mirrors the blocking sources of isAuthBlockedForModel: matched
+// per-model states win, otherwise the auth-level quota state decides.
+func antigravityGenericExhaustedAuthBlock(auth *Auth, model string, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.TrimSpace(model) != "" && len(auth.ModelStates) > 0 {
+		modelKey := canonicalModelKey(model)
+		matched := false
+		generic := false
+		for stateModel, state := range auth.ModelStates {
+			if state == nil || canonicalModelKey(stateModel) != modelKey {
+				continue
+			}
+			matched = true
+			blocked, _, _ := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+			if blocked && isAntigravityGenericExhaustedResult(auth.Provider, state.LastError) {
+				generic = true
+			}
+		}
+		if matched {
+			return generic
+		}
+	}
+	blocked, _, _ := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	return blocked && isAntigravityGenericExhaustedResult(auth.Provider, auth.LastError)
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {

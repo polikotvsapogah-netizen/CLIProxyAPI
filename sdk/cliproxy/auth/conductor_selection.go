@@ -686,9 +686,9 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
-func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
+func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool, bool) {
 	if m == nil || len(providers) == 0 {
-		return 0, false
+		return 0, false, false
 	}
 	now := time.Now()
 	defaultRetry := int(m.requestRetry.Load())
@@ -706,8 +706,9 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var (
-		found   bool
-		minWait time.Duration
+		found            bool
+		minWait          time.Duration
+		genericExhausted bool
 	)
 	for _, auth := range m.auths {
 		if auth == nil {
@@ -742,9 +743,10 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 		if !found || wait < minWait {
 			minWait = wait
 			found = true
+			genericExhausted = antigravityGenericExhaustedAuthBlock(auth, checkModel, now)
 		}
 	}
-	return minWait, found
+	return minWait, found, genericExhausted
 }
 
 func (m *Manager) retryAllowed(attempt int, providers []string) bool {
@@ -809,9 +811,12 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
-	wait, found := m.closestCooldownWait(providers, model, attempt)
+	wait, found, genericExhausted := m.closestCooldownWait(providers, model, attempt)
 	if found {
-		if wait > maxWait {
+		// HQ#1104: a generic Antigravity exhausted cooldown marks a drained
+		// quota, not a short rate-limit window; refuse instead of waiting out
+		// its tail. Other cooldown classes keep the wait policy.
+		if genericExhausted || wait > maxWait {
 			return 0, false
 		}
 		return wait, true
