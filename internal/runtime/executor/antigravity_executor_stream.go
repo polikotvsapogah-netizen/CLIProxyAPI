@@ -30,7 +30,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
 		return nil, homeKVUnavailableStatusErr(errCooldown)
 	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
-		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
+		fields := antigravityShortCooldownLogFields(auth, baseModel)
+		fields["remaining_s"] = remaining.Seconds()
+		helps.LogWithRequestID(ctx).WithFields(fields).Warn("antigravity executor: stream request refused locally by auth+model short cooldown")
 		d := remaining
 		return nil, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
 	}
@@ -85,6 +87,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
+	var pendingCooldown *antigravityPendingShortCooldown
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
 		var lastStatus int
@@ -157,6 +160,10 @@ attemptLoop:
 				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 				if httpResp.StatusCode == http.StatusTooManyRequests {
+					// HQ#1099: the pending cooldown must represent the current response
+					// only; a fresh classification invalidates an earlier endpoint's
+					// observation.
+					pendingCooldown = nil
 					decision := decideAntigravity429(bodyBytes)
 
 					switch decision.kind {
@@ -173,11 +180,16 @@ attemptLoop:
 						}
 					case antigravity429DecisionShortCooldownSwitchAuth:
 						if decision.retryAfter != nil && *decision.retryAfter > 0 {
-							if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
-								err = homeKVUnavailableStatusErr(errMarkCooldown)
-								return nil, err
+							// HQ#1099: defer the record until this request gives up with a
+							// 429; a fallback base URL may still serve this auth+model.
+							observed := time.Now()
+							pendingCooldown = &antigravityPendingShortCooldown{
+								observedAt: observed,
+								retryAfter: *decision.retryAfter,
+								endpoint:   antigravityEndpointHostForLog(baseURL),
+								reason:     decision.reason,
 							}
-							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
+							helps.LogWithRequestID(ctx).WithFields(antigravityPendingShortCooldownLogFields(auth, baseModel, pendingCooldown)).Warn("antigravity executor: upstream 429 requests short cooldown, record deferred until final failure")
 						}
 					case antigravity429DecisionFullQuotaExhausted:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
@@ -229,6 +241,10 @@ attemptLoop:
 				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
 					// Report the upstream failure rather than the cleanup failure.
 					logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+				}
+				if errMarkCooldown := antigravityCommitPendingShortCooldown(ctx, auth, baseModel, httpResp.StatusCode, pendingCooldown); errMarkCooldown != nil {
+					err = homeKVUnavailableStatusErr(errMarkCooldown)
+					return nil, err
 				}
 				err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 				return nil, err

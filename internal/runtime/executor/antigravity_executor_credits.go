@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,16 @@ type antigravity429Category string
 type antigravityCreditsFailureState struct {
 	PermanentlyDisabled      bool
 	ExplicitBalanceExhausted bool
+}
+
+// antigravityPendingShortCooldown carries one upstream short-cooldown
+// observation until the request finally fails (HQ#1099). It is never stored;
+// the store keeps the original plain timestamp values.
+type antigravityPendingShortCooldown struct {
+	observedAt time.Time     // moment the upstream 429 was received
+	retryAfter time.Duration // upstream TTL measured from observedAt
+	endpoint   string        // upstream hostname for safe diagnostics
+	reason     string        // upstream ErrorInfo reason, e.g. RATE_LIMIT_EXCEEDED
 }
 
 type antigravity429DecisionKind string
@@ -719,6 +730,53 @@ func markAntigravityShortCooldownRequired(ctx context.Context, auth *cliproxyaut
 	}
 	antigravityShortCooldownByAuth.Store(key, now.Add(duration))
 	return nil
+}
+
+// antigravityCommitPendingShortCooldown records a pending short cooldown only
+// when the request finally fails with the upstream 429 that requested it
+// (HQ#1099). The TTL starts at the moment of the original 429, not at commit
+// time, so retries do not restart the full cooldown. A successful fallback
+// endpoint never records a cooldown, so success never erases another
+// request's fresher record.
+func antigravityCommitPendingShortCooldown(ctx context.Context, auth *cliproxyauth.Auth, modelName string, statusCode int, pending *antigravityPendingShortCooldown) error {
+	if statusCode != http.StatusTooManyRequests || pending == nil {
+		return nil
+	}
+	return markAntigravityShortCooldownRequired(ctx, auth, modelName, pending.observedAt, pending.retryAfter)
+}
+
+// antigravityShortCooldownLogFields builds safe structured log fields: hashed
+// credential identity and model name, no prompt or credential material. The
+// keys match the production log formatter whitelist.
+func antigravityShortCooldownLogFields(auth *cliproxyauth.Auth, modelName string) log.Fields {
+	fields := log.Fields{"model": modelName}
+	if auth != nil {
+		fields["credential"] = homekv.HashKeyPart(auth.ID)
+	}
+	return fields
+}
+
+// antigravityPendingShortCooldownLogFields extends the base fields with the
+// safe provenance of the upstream 429 observation.
+func antigravityPendingShortCooldownLogFields(auth *cliproxyauth.Auth, modelName string, pending *antigravityPendingShortCooldown) log.Fields {
+	fields := antigravityShortCooldownLogFields(auth, modelName)
+	if pending != nil {
+		fields["observed_at"] = pending.observedAt.UTC().Format(time.RFC3339Nano)
+		fields["endpoint"] = pending.endpoint
+		fields["reason"] = pending.reason
+		fields["retry_after_s"] = pending.retryAfter.Seconds()
+	}
+	return fields
+}
+
+// antigravityEndpointHostForLog reduces an upstream base URL to its hostname
+// for safe diagnostics: no scheme, port, query, or userinfo.
+func antigravityEndpointHostForLog(rawURL string) string {
+	parsed, errParse := url.Parse(rawURL)
+	if errParse != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 func storeAntigravityCreditsBalanceBestEffort(authID string, bal antigravityCreditsBalance) {

@@ -122,3 +122,39 @@ func TestLogFormatterOmitsGenericPathField(t *testing.T) {
 		}
 	}
 }
+
+func TestLogFormatterPrintsCooldownDiagnosticFields(t *testing.T) {
+	entry := log.NewEntry(log.New())
+	entry.Time = time.Date(2026, 9, 12, 12, 0, 0, 0, time.Local)
+	entry.Level = log.WarnLevel
+	entry.Message = "antigravity executor: upstream 429 requests short cooldown, record deferred until final failure"
+	entry.Data["request_id"] = "req-123"
+	entry.Data["model"] = "gemini-3.6-flash-high"
+	entry.Data["credential"] = "abc123"
+	entry.Data["endpoint"] = "cloudcode-pa.googleapis.com"
+	entry.Data["reason"] = "RATE_LIMIT_EXCEEDED"
+	entry.Data["retry_after_s"] = 120.0
+	entry.Data["remaining_s"] = 119.9
+	entry.Data["observed_at"] = "2026-09-12T05:00:00Z"
+
+	formatted, errFormat := (&LogFormatter{}).Format(entry)
+	if errFormat != nil {
+		t.Fatalf("Format() error = %v", errFormat)
+	}
+
+	line := string(formatted)
+	for _, want := range []string{
+		"[req-123]",
+		"model=gemini-3.6-flash-high",
+		"credential=\"abc123\"",
+		"endpoint=cloudcode-pa.googleapis.com",
+		"reason=\"RATE_LIMIT_EXCEEDED\"",
+		"retry_after_s=120",
+		"remaining_s=119.9",
+		"observed_at=2026-09-12T05:00:00Z",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("formatted line %q missing %q", line, want)
+		}
+	}
+}
