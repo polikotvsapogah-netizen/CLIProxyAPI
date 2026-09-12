@@ -122,40 +122,48 @@ func TestMarkResultNonAntigravityGenericBodyKeepsLadder(t *testing.T) {
 
 // HQ#1104 review R2: an auth-level result carrying a retry hint must keep the
 // short hint cooldown; the generic exhausted floor must not be applied on top
-// of a recognized RetryAfter.
+// of a recognized RetryAfter. The hint-less generic body pins the per-auth
+// result.RetryAfter guard itself: the classifier sees a generic refusal there,
+// so only the guard keeps the floor off.
 func TestMarkResultAuthRetryHintKeepsShortCooldown(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 
 	hint := 2 * time.Second
+	for name, body := range map[string]string{
+		"retry_info_body":              `{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"2s"}]}}`,
+		"hint_without_retry_info_body": antigravityGenericExhaustedTestBody,
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			auth := &Auth{ID: "hq1104-auth-hint-" + name, Provider: "antigravity"}
+			if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+				t.Fatalf("Register returned error: %v", errRegister)
+			}
 
-	manager := NewManager(nil, nil, nil)
-	auth := &Auth{ID: "hq1104-auth-hint", Provider: "antigravity"}
-	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
-		t.Fatalf("Register returned error: %v", errRegister)
-	}
+			result := antigravityGenericExhaustedResult(auth.ID, "")
+			result.Error.Message = body
+			result.RetryAfter = &hint
 
-	result := antigravityGenericExhaustedResult(auth.ID, "")
-	result.Error.Message = `{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"2s"}]}}`
-	result.RetryAfter = &hint
+			before := time.Now()
+			manager.MarkResult(context.Background(), result)
+			after := time.Now()
 
-	before := time.Now()
-	manager.MarkResult(context.Background(), result)
-	after := time.Now()
-
-	updated, ok := manager.GetByID(auth.ID)
-	if !ok || updated == nil {
-		t.Fatalf("expected auth state after retry-hinted 429")
-	}
-	if updated.Quota.NextRecoverAt.Before(before.Add(hint)) || updated.Quota.NextRecoverAt.After(after.Add(hint)) {
-		t.Fatalf("auth retry-hint cooldown = %v, want %v", updated.Quota.NextRecoverAt.Sub(before), hint)
-	}
-	blocked, _, next := isAuthBlockedForModel(updated, "", before.Add(hint-time.Second))
-	if !blocked {
-		t.Fatal("selector did not block before the retry-hint deadline")
-	}
-	blocked, _, _ = isAuthBlockedForModel(updated, "", next.Add(time.Nanosecond))
-	if blocked {
-		t.Fatal("selector blocked after the retry-hint deadline")
+			updated, ok := manager.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatalf("expected auth state after retry-hinted 429")
+			}
+			if updated.Quota.NextRecoverAt.Before(before.Add(hint)) || updated.Quota.NextRecoverAt.After(after.Add(hint)) {
+				t.Fatalf("auth retry-hint cooldown = %v, want %v", updated.Quota.NextRecoverAt.Sub(before), hint)
+			}
+			blocked, _, next := isAuthBlockedForModel(updated, "", before.Add(hint-time.Second))
+			if !blocked {
+				t.Fatal("selector did not block before the retry-hint deadline")
+			}
+			blocked, _, _ = isAuthBlockedForModel(updated, "", next.Add(time.Nanosecond))
+			if blocked {
+				t.Fatal("selector blocked after the retry-hint deadline")
+			}
+		})
 	}
 }
 
