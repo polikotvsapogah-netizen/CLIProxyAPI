@@ -278,7 +278,16 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 		}
 	}
 
-	decision.kind = antigravity429DecisionSoftRetry
+	// HQ#1104: a generic RESOURCE_EXHAUSTED refusal (no ErrorInfo reason, no
+	// retryDelay, no quota keywords) means the account quota is drained; do not
+	// soft-retry it on the same auth. Each fallback base URL gets one attempt
+	// and the auth refuses.
+	if decision.retryAfter != nil {
+		// A recognized retry hint keeps the pre-HQ#1104 soft-retry recovery
+		// (HQ#1104 review R2); only a hint-less refusal is a drained quota.
+		return decision
+	}
+	decision.kind = antigravity429DecisionFullQuotaExhausted
 	return decision
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -818,6 +819,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next = now.Add(*result.RetryAfter)
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
+									next = antigravityGenericExhaustedCooldownFloor(result.Provider, result.Error, next, now)
 								}
 							}
 							state.NextRetryAfter = next
@@ -852,6 +854,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				disableCooling := m.cooldownDisabledForAuth(auth)
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				if result.RetryAfter == nil {
+					if floored := antigravityGenericExhaustedCooldownFloor(result.Provider, result.Error, auth.Quota.NextRecoverAt, now); !floored.Equal(auth.Quota.NextRecoverAt) {
+						auth.Quota.NextRecoverAt = floored
+						auth.NextRetryAfter = floored
+					}
+				}
 			}
 		}
 
@@ -1711,6 +1719,100 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	return clienterror.IsRequestFault(statusCodeFromError(err), err)
+}
+
+// antigravityQuotaExhaustedKeywords mirrors the executor-side quota keywords
+// (internal/runtime/executor decideAntigravity429) that reclassify a
+// RESOURCE_EXHAUSTED body before the generic check applies.
+var antigravityQuotaExhaustedKeywords = []string{"quota_exhausted", "quota exhausted"}
+
+// isAntigravityGenericExhaustedResult mirrors the executor-side classification
+// of a generic RESOURCE_EXHAUSTED refusal: quota status without an ErrorInfo
+// reason, without a retry hint, and without quota keywords.
+func isAntigravityGenericExhaustedResult(provider string, resultErr *Error) bool {
+	if resultErr == nil || resultErr.HTTPStatus != http.StatusTooManyRequests {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(provider), "antigravity") {
+		return false
+	}
+	body := resultErr.Message
+	if !gjson.ValidBytes([]byte(body)) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes([]byte(body), "error.status").String()), "RESOURCE_EXHAUSTED") {
+		return false
+	}
+	details := gjson.GetBytes([]byte(body), "error.details")
+	if details.Exists() && details.IsArray() {
+		for _, detail := range details.Array() {
+			if detail.Get("@type").String() == "type.googleapis.com/google.rpc.RetryInfo" && detail.Get("retryDelay").String() != "" {
+				// A retry hint keeps the short soft-retry path; the refusal is
+				// not a generic exhausted one (HQ#1104 review R2).
+				return false
+			}
+		}
+		for _, detail := range details.Array() {
+			if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+				continue
+			}
+			reason := strings.TrimSpace(detail.Get("reason").String())
+			if strings.EqualFold(reason, "QUOTA_EXHAUSTED") || strings.EqualFold(reason, "RATE_LIMIT_EXCEEDED") {
+				return false
+			}
+		}
+	}
+	lowerBody := strings.ToLower(body)
+	for _, keyword := range antigravityQuotaExhaustedKeywords {
+		if strings.Contains(lowerBody, keyword) {
+			return false
+		}
+	}
+	return true
+}
+
+// antigravityGenericExhaustedCooldownFloor lifts a quota cooldown deadline to
+// at least antigravityGenericExhaustedMinCooldown for generic Antigravity
+// RESOURCE_EXHAUSTED refusals (HQ#1104). The backoff level keeps its own
+// progression; only the deadline is floored.
+func antigravityGenericExhaustedCooldownFloor(provider string, resultErr *Error, next, now time.Time) time.Time {
+	if !isAntigravityGenericExhaustedResult(provider, resultErr) {
+		return next
+	}
+	if floor := now.Add(antigravityGenericExhaustedMinCooldown); next.Before(floor) {
+		return floor
+	}
+	return next
+}
+
+// antigravityGenericExhaustedAuthBlock reports whether the active cooldown for
+// this auth and model was produced by a generic Antigravity exhausted 429
+// (HQ#1104). It mirrors the blocking sources of isAuthBlockedForModel: matched
+// per-model states win, otherwise the auth-level quota state decides.
+func antigravityGenericExhaustedAuthBlock(auth *Auth, model string, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.TrimSpace(model) != "" && len(auth.ModelStates) > 0 {
+		modelKey := canonicalModelKey(model)
+		matched := false
+		generic := false
+		for stateModel, state := range auth.ModelStates {
+			if state == nil || canonicalModelKey(stateModel) != modelKey {
+				continue
+			}
+			matched = true
+			blocked, _, _ := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+			if blocked && isAntigravityGenericExhaustedResult(auth.Provider, state.LastError) {
+				generic = true
+			}
+		}
+		if matched {
+			return generic
+		}
+	}
+	blocked, _, _ := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	return blocked && isAntigravityGenericExhaustedResult(auth.Provider, auth.LastError)
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
