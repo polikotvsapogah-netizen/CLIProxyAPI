@@ -7,12 +7,17 @@ pulling upstream into a dirty working tree.
 
 - Upstream baseline: `origin/main` tag `v7.2.127` (commit `ecc9aa72`).
 - Polikot upgrade branch: `polikot/full-v7.2.127-upgrade-20260810_174201`.
-- Production build metadata after the 2026-08-19 deploy:
+- Production branch since 2026-09-12: `polikotvsapogah-netizen/hq1099-router-production`
+  (its tip is the deployed commit; HQ#1099 and HQ#1104 merged there).
+- Production build metadata after the 2026-09-13 deploy:
   - version: `v7.2.127-polikot`
-  - commit: `9a094fabebd9` (adds `grok-4.6` to the embedded catalog)
+  - commit: `0de2bddb0635` (HQ#1104: fast refusal and 60 s cooldown floor for generic
+    Antigravity exhausted 429, on top of the HQ#1099 Antigravity 429 repair `b68363aa`)
 - Pre-upgrade rollback snapshot:
   `/Users/aipolikot/myai/RoutingMainKeys/backups/pre-upgrade-20260810_174201`.
 - Previous production binaries:
+  - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.127-polikot-pre-hq1104-20260913_040208`
+    (the 2026-09-12 HQ#1099 build `b68363aa`, rollback for the HQ#1104 deploy)
   - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.127-polikot-pre-grok46-20260819_044037`
     (the 2026-08-10 build, rollback for the `grok-4.6` deploy)
   - `/Users/aipolikot/myai/RoutingMainKeys/state/cliproxy/bin/cliproxyapi.bak-v7.2.111-pre-v7.2.127-20260810_174201`
