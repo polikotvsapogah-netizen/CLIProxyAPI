@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	logging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
 )
 
 const antigravityCooldownTestModel = "gemini-3.6-flash-high"
@@ -559,6 +562,48 @@ func TestAntigravityPendingCooldownTracksFinalRefusal(t *testing.T) {
 					t.Fatalf("cooldown remaining = %s, want 0 < remaining <= %s", remaining, scenario.wantMaxRemaining)
 				}
 			})
+		}
+	}
+}
+
+// The production log formatter only prints whitelisted fields; this pins that
+// the cooldown diagnostics survive formatting into the main.log line,
+// including the request_id segment sourced from the request context.
+func TestAntigravityCooldownLogFieldsReachProductionFormatter(t *testing.T) {
+	auth := antigravityCooldownTestAuth("hq-formatter")
+	pending := &antigravityPendingShortCooldown{
+		observedAt: time.Date(2026, 9, 12, 5, 0, 0, 0, time.UTC),
+		retryAfter: 120 * time.Second,
+		endpoint:   "cloudcode-pa.googleapis.com",
+		reason:     "RATE_LIMIT_EXCEEDED",
+	}
+	ctx := logging.WithRequestID(context.Background(), "req-42")
+	entry := helps.LogWithRequestID(ctx).WithFields(antigravityPendingShortCooldownLogFields(auth, antigravityCooldownTestModel, pending))
+	entry.Time = time.Date(2026, 9, 12, 12, 0, 0, 0, time.Local)
+	entry.Level = log.WarnLevel
+	entry.Message = "antigravity executor: upstream 429 requests short cooldown, record deferred until final failure"
+
+	formatted, errFormat := (&logging.LogFormatter{}).Format(entry)
+	if errFormat != nil {
+		t.Fatalf("Format() error = %v", errFormat)
+	}
+	line := string(formatted)
+	for _, want := range []string{
+		"[req-42]",
+		"model=" + antigravityCooldownTestModel,
+		"credential=",
+		"endpoint=cloudcode-pa.googleapis.com",
+		"reason=\"RATE_LIMIT_EXCEEDED\"",
+		"retry_after_s=120",
+		"observed_at=2026-09-12T05:00:00Z",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("formatted line %q missing %q", line, want)
+		}
+	}
+	for _, forbidden := range []string{"access_token", "prompt"} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("formatted line %q leaks %q", line, forbidden)
 		}
 	}
 }

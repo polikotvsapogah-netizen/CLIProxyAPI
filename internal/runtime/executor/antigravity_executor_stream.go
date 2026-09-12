@@ -32,7 +32,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
 		fields := antigravityShortCooldownLogFields(auth, baseModel)
 		fields["remaining_s"] = remaining.Seconds()
-		log.WithFields(fields).Warn("antigravity executor: stream request refused locally by auth+model short cooldown")
+		helps.LogWithRequestID(ctx).WithFields(fields).Warn("antigravity executor: stream request refused locally by auth+model short cooldown")
 		d := remaining
 		return nil, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
 	}
@@ -189,7 +189,7 @@ attemptLoop:
 								endpoint:   antigravityEndpointHostForLog(baseURL),
 								reason:     decision.reason,
 							}
-							log.WithFields(antigravityPendingShortCooldownLogFields(auth, baseModel, pendingCooldown)).Warn("antigravity executor: upstream 429 requests short cooldown, record deferred until final failure")
+							helps.LogWithRequestID(ctx).WithFields(antigravityPendingShortCooldownLogFields(auth, baseModel, pendingCooldown)).Warn("antigravity executor: upstream 429 requests short cooldown, record deferred until final failure")
 						}
 					case antigravity429DecisionFullQuotaExhausted:
 						if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {

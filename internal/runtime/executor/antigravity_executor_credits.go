@@ -746,11 +746,12 @@ func antigravityCommitPendingShortCooldown(ctx context.Context, auth *cliproxyau
 }
 
 // antigravityShortCooldownLogFields builds safe structured log fields: hashed
-// auth identity and model name, no prompt or credential material.
+// credential identity and model name, no prompt or credential material. The
+// keys match the production log formatter whitelist.
 func antigravityShortCooldownLogFields(auth *cliproxyauth.Auth, modelName string) log.Fields {
 	fields := log.Fields{"model": modelName}
 	if auth != nil {
-		fields["auth"] = homekv.HashKeyPart(auth.ID)
+		fields["credential"] = homekv.HashKeyPart(auth.ID)
 	}
 	return fields
 }
@@ -762,7 +763,7 @@ func antigravityPendingShortCooldownLogFields(auth *cliproxyauth.Auth, modelName
 	if pending != nil {
 		fields["observed_at"] = pending.observedAt.UTC().Format(time.RFC3339Nano)
 		fields["endpoint"] = pending.endpoint
-		fields["upstream_reason"] = pending.reason
+		fields["reason"] = pending.reason
 		fields["retry_after_s"] = pending.retryAfter.Seconds()
 	}
 	return fields
