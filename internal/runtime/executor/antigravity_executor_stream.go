@@ -160,6 +160,10 @@ attemptLoop:
 				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 				if httpResp.StatusCode == http.StatusTooManyRequests {
+					// HQ#1099: the pending cooldown must represent the current response
+					// only; a fresh classification invalidates an earlier endpoint's
+					// observation.
+					pendingCooldown = nil
 					decision := decideAntigravity429(bodyBytes)
 
 					switch decision.kind {

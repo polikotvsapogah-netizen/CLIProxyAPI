@@ -422,3 +422,143 @@ func TestAntigravityShortCooldownHomeKVReconciliation(t *testing.T) {
 		}
 	})
 }
+func antigravitySoftRateLimitedBody() []byte {
+	return []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"}]}}`)
+}
+
+func antigravityQuotaExhaustedBody() []byte {
+	return []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`)
+}
+
+func newAntigravitySingleRetryExecutor() *AntigravityExecutor {
+	return NewAntigravityExecutor(&config.Config{RequestRetry: 0})
+}
+
+func runAntigravityCooldownPath(t *testing.T, path string, e *AntigravityExecutor, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+	t.Helper()
+	if path == "stream" {
+		result, err := e.ExecuteStream(context.Background(), auth, req, opts)
+		if err == nil {
+			drainAntigravityStream(t, result)
+		}
+		return err
+	}
+	_, err := e.Execute(context.Background(), auth, req, opts)
+	return err
+}
+
+// HQ#1099 follow-up: the pending cooldown must represent the current final
+// upstream refusal only. A short-cooldown 429 observed on an earlier endpoint
+// must never be committed when the request finally fails with a different 429
+// class, and a later short-cooldown observation must re-anchor the deadline.
+func TestAntigravityPendingCooldownTracksFinalRefusal(t *testing.T) {
+	scenarios := []struct {
+		name             string
+		finalBody        []byte
+		wantKind         antigravity429DecisionKind
+		wantCooldown     bool
+		wantMaxRemaining time.Duration
+	}{
+		{
+			name:         "short 120s then instant 1s commits nothing",
+			finalBody:    antigravityRateLimitedBody("1s"),
+			wantKind:     antigravity429DecisionInstantRetrySameAuth,
+			wantCooldown: false,
+		},
+		{
+			name:         "short 120s then soft retry commits nothing",
+			finalBody:    antigravitySoftRateLimitedBody(),
+			wantKind:     antigravity429DecisionSoftRetry,
+			wantCooldown: false,
+		},
+		{
+			name:         "short 120s then full quota commits nothing",
+			finalBody:    antigravityQuotaExhaustedBody(),
+			wantKind:     antigravity429DecisionFullQuotaExhausted,
+			wantCooldown: false,
+		},
+		{
+			name:             "short 120s then short 10s reanchors deadline",
+			finalBody:        antigravityRateLimitedBody("10s"),
+			wantKind:         antigravity429DecisionShortCooldownSwitchAuth,
+			wantCooldown:     true,
+			wantMaxRemaining: 10 * time.Second,
+		},
+	}
+	paths := []struct {
+		name  string
+		path  string
+		model string
+	}{
+		{name: "execute", path: "execute", model: antigravityCooldownTestModel},
+		{name: "stream", path: "stream", model: antigravityCooldownTestModel},
+		{name: "claude", path: "execute", model: "claude-sonnet-4-5"},
+	}
+	for _, scenario := range scenarios {
+		if got := decideAntigravity429(scenario.finalBody).kind; got != scenario.wantKind {
+			t.Fatalf("%s: classifier kind = %q, want %q", scenario.name, got, scenario.wantKind)
+		}
+		for _, p := range paths {
+			t.Run(scenario.name+"/"+p.name, func(t *testing.T) {
+				resetAntigravityCreditsRetryState()
+				t.Cleanup(resetAntigravityCreditsRetryState)
+				var first, second atomic.Int32
+				shortSrv := newRateLimitedAntigravityEndpoint(&first, "120s")
+				defer shortSrv.Close()
+				finalSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					second.Add(1)
+					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = w.Write(scenario.finalBody)
+				}))
+				defer finalSrv.Close()
+				success := newSuccessAntigravityEndpoint(nil, antigravitySuccessBody())
+				defer success.Close()
+				useAntigravityCooldownFallbackOrder(t, func(string) []string {
+					return []string{shortSrv.URL, finalSrv.URL}
+				})
+
+				e := newAntigravitySingleRetryExecutor()
+				req, opts := antigravityCooldownTestRequest(p.model)
+				auth := antigravityCooldownTestAuth("hq-final-refusal")
+
+				if err := runAntigravityCooldownPath(t, p.path, e, auth, req, opts); err == nil {
+					t.Fatal("expected the final upstream refusal to fail the request")
+				}
+				if first.Load() != 1 || second.Load() != 1 {
+					t.Fatalf("unexpected endpoint counts: %d/%d", first.Load(), second.Load())
+				}
+
+				inCooldown, remaining, errRead := antigravityIsInShortCooldownRequired(context.Background(), auth, p.model, time.Now())
+				if errRead != nil {
+					t.Fatalf("cooldown read: %v", errRead)
+				}
+				if !scenario.wantCooldown {
+					if inCooldown {
+						t.Fatalf("final %q refusal must not commit the earlier short cooldown, %s remaining", scenario.wantKind, remaining)
+					}
+					// Success controls: the auth path keeps serving right after the
+					// mixed refusal, and stays serving after successful requests.
+					useAntigravityCooldownFallbackOrder(t, func(string) []string {
+						return []string{shortSrv.URL, success.URL}
+					})
+					if err := runAntigravityCooldownPath(t, p.path, e, auth, req, opts); err != nil {
+						t.Fatalf("success control after mixed refusal: %v", err)
+					}
+					if err := runAntigravityCooldownPath(t, p.path, e, auth, req, opts); err != nil {
+						t.Fatalf("second success control after mixed refusal: %v", err)
+					}
+					if first.Load() != 3 {
+						t.Fatalf("success controls must reach upstream, first endpoint hits = %d", first.Load())
+					}
+					return
+				}
+				if !inCooldown {
+					t.Fatal("expected the final short-cooldown refusal to record a cooldown")
+				}
+				if remaining <= 0 || remaining > scenario.wantMaxRemaining {
+					t.Fatalf("cooldown remaining = %s, want 0 < remaining <= %s", remaining, scenario.wantMaxRemaining)
+				}
+			})
+		}
+	}
+}
