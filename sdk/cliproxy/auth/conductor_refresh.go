@@ -32,7 +32,12 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
-	transientErrorCooldown    = time.Minute
+	// antigravityGenericExhaustedMinCooldown floors the quota cooldown after a
+	// generic Antigravity RESOURCE_EXHAUSTED 429 (no ErrorInfo reason, no
+	// retryDelay): the account quota is drained, so a shorter window only
+	// produces another round of doomed upstream calls (HQ#1104).
+	antigravityGenericExhaustedMinCooldown = 60 * time.Second
+	transientErrorCooldown                 = time.Minute
 )
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
