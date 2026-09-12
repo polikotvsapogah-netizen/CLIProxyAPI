@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	logging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -279,64 +281,209 @@ func TestAntigravityShortCooldownScopePerAuthAndModel(t *testing.T) {
 	}
 }
 
-// A late success of an older request must not erase the cooldown that a newer
-// concurrent failure has just recorded.
+// A late success of an older request must not erase the short cooldown that a
+// newer request for the SAME auth+model recorded on its final 429: success
+// mutates no cooldown state, so the next same-key request stays refused
+// locally. Exercises the Execute, ExecuteStream, and Claude Execute
+// entrypoints against both the in-memory store and home KV.
 func TestAntigravityLateSuccessDoesNotEraseNewerCooldown(t *testing.T) {
+	stores := []struct {
+		name   string
+		homeKV bool
+	}{
+		{name: "syncmap"},
+		{name: "homekv", homeKV: true},
+	}
+	paths := []struct {
+		name  string
+		path  string
+		model string
+	}{
+		{name: "execute", path: "execute", model: antigravityCooldownTestModel},
+		{name: "stream", path: "stream", model: antigravityCooldownTestModel},
+		{name: "claude", path: "execute", model: "claude-sonnet-4-5"},
+	}
+	for _, store := range stores {
+		for _, p := range paths {
+			t.Run(store.name+"/"+p.name, func(t *testing.T) {
+				runAntigravityLateSuccessSameKeyScenario(t, p.path, p.model, store.homeKV)
+			})
+		}
+	}
+}
+
+// antigravityCooldownKVFake is a minimal concurrency-safe home KV fake for
+// scenarios that drive real executor goroutines concurrently.
+type antigravityCooldownKVFake struct {
+	mu     sync.Mutex
+	values map[string][]byte
+}
+
+func (c *antigravityCooldownKVFake) KVGet(_ context.Context, key string) ([]byte, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	value, ok := c.values[key]
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), value...), true, nil
+}
+
+func (c *antigravityCooldownKVFake) KVSet(_ context.Context, key string, value []byte, _ homekv.KVSetOptions) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.values[key] = append([]byte(nil), value...)
+	return true, nil
+}
+
+func (c *antigravityCooldownKVFake) KVSetNX(_ context.Context, key string, value []byte, _ time.Duration) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.values[key]; ok {
+		return false, nil
+	}
+	c.values[key] = append([]byte(nil), value...)
+	return true, nil
+}
+
+func (c *antigravityCooldownKVFake) KVDel(_ context.Context, keys ...string) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var deleted int64
+	for _, key := range keys {
+		if _, ok := c.values[key]; ok {
+			delete(c.values, key)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+// useAntigravityCooldownKVStore routes the executor at a threadsafe in-memory
+// home KV store for the duration of the test.
+func useAntigravityCooldownKVStore(t *testing.T) *antigravityCooldownKVFake {
+	t.Helper()
+	fake := &antigravityCooldownKVFake{values: make(map[string][]byte)}
+	previous := currentAntigravityKVClient
+	currentAntigravityKVClient = func() (antigravityKVClient, bool, error) {
+		return fake, true, nil
+	}
+	t.Cleanup(func() {
+		currentAntigravityKVClient = previous
+	})
+	return fake
+}
+
+// runAntigravityLateSuccessSameKeyScenario parks an older request on its
+// successful fallback endpoint, records a fresh short cooldown from a newer
+// request with the same auth+model, then releases the older success. The
+// recorded cooldown must survive: the next same-key request is refused
+// locally without any upstream call.
+func runAntigravityLateSuccessSameKeyScenario(t *testing.T, path, model string, homeKV bool) {
+	t.Helper()
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
-	var lateThrottled, otherFirst, otherSecond atomic.Int32
+	if homeKV {
+		useAntigravityCooldownKVStore(t)
+	}
+
+	var lateThrottled, bFirst, bSecond, served atomic.Int32
 	lateThrottle := newRateLimitedAntigravityEndpoint(&lateThrottled, "120s")
-	defer lateThrottle.Close()
-	otherFirstSrv := newRateLimitedAntigravityEndpoint(&otherFirst, "120s")
-	defer otherFirstSrv.Close()
-	otherSecondSrv := newRateLimitedAntigravityEndpoint(&otherSecond, "120s")
-	defer otherSecondSrv.Close()
+	bFirstSrv := newRateLimitedAntigravityEndpoint(&bFirst, "120s")
+	bSecondSrv := newRateLimitedAntigravityEndpoint(&bSecond, "120s")
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
 	gated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entered <- struct{}{}
 		<-release
+		served.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(antigravitySuccessBody())
 	}))
-	defer gated.Close()
-	useAntigravityCooldownFallbackOrder(t, func(authID string) []string {
-		if authID == "hq-late-success" {
-			return []string{lateThrottle.URL, gated.URL}
-		}
-		return []string{otherFirstSrv.URL, otherSecondSrv.URL}
+	// Cleanup order matters: release the parked request before closing the
+	// gated server, otherwise Close waits forever on the parked handler even
+	// when an assertion failed earlier.
+	t.Cleanup(func() {
+		lateThrottle.Close()
+		bFirstSrv.Close()
+		bSecondSrv.Close()
+		gated.Close()
+	})
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
 	})
 
-	e := newAntigravityCooldownExecutor()
-	req, opts := antigravityCooldownTestRequest(antigravityCooldownTestModel)
-	lateAuth := antigravityCooldownTestAuth("hq-late-success")
-	otherAuth := antigravityCooldownTestAuth("hq-other-account")
+	var phase atomic.Int32
+	useAntigravityCooldownFallbackOrder(t, func(string) []string {
+		if phase.Load() == 0 {
+			return []string{lateThrottle.URL, gated.URL}
+		}
+		return []string{bFirstSrv.URL, bSecondSrv.URL}
+	})
 
-	lateResult := make(chan error, 1)
+	e := newAntigravitySingleRetryExecutor()
+	req, opts := antigravityCooldownTestRequest(model)
+	auth := antigravityCooldownTestAuth("hq-late-success-same-key")
+
+	type lateOutcome struct {
+		stream *cliproxyexecutor.StreamResult
+		err    error
+	}
+	lateDone := make(chan lateOutcome, 1)
 	go func() {
-		_, err := e.Execute(context.Background(), lateAuth, req, opts)
-		lateResult <- err
+		if path == "stream" {
+			result, err := e.ExecuteStream(context.Background(), auth, req, opts)
+			lateDone <- lateOutcome{stream: result, err: err}
+			return
+		}
+		_, err := e.Execute(context.Background(), auth, req, opts)
+		lateDone <- lateOutcome{err: err}
 	}()
-	<-entered // the late request is parked on the fallback endpoint
-
-	// A concurrent request for another auth exhausts both endpoints and records
-	// a fresh short cooldown on its final failure.
-	if _, err := e.Execute(context.Background(), otherAuth, req, opts); err == nil {
-		t.Fatal("expected concurrent request to fail with upstream 429s")
+	select {
+	case <-entered: // the older request saw a short 429 and is parked on its fallback
+	case outcome := <-lateDone:
+		t.Fatalf("older request finished before reaching the fallback endpoint: %v", outcome.err)
 	}
 
-	close(release) // the late request now succeeds on its fallback endpoint
-	if err := <-lateResult; err != nil {
-		t.Fatalf("late request should succeed after fallback: %v", err)
+	// A newer request for the same auth+model exhausts both endpoints and
+	// records the cooldown on its final 429 while the older request is parked.
+	phase.Store(1)
+	if err := runAntigravityCooldownPath(t, path, e, auth, req, opts); err == nil {
+		t.Fatal("expected the newer same-key request to fail upstream")
+	} else if strings.Contains(err.Error(), "short cooldown") {
+		t.Fatalf("newer request must fail with the upstream 429, got local refusal: %v", err)
+	}
+	if bFirst.Load() != 1 || bSecond.Load() != 1 {
+		t.Fatalf("unexpected newer-request endpoint counts: %d/%d", bFirst.Load(), bSecond.Load())
+	}
+	inCooldown, remaining, errRead := antigravityIsInShortCooldownRequired(context.Background(), auth, model, time.Now())
+	if errRead != nil {
+		t.Fatalf("cooldown read after the newer refusal: %v", errRead)
+	}
+	if !inCooldown || remaining <= 0 || remaining > 120*time.Second {
+		t.Fatalf("newer refusal must record the cooldown, inCooldown=%v remaining=%s", inCooldown, remaining)
 	}
 
-	// The newer failure's cooldown must survive the late success.
-	_, err := e.Execute(context.Background(), otherAuth, req, opts)
-	if err == nil || !strings.Contains(err.Error(), "short cooldown") {
-		t.Fatalf("expected local refusal for the newer failure cooldown, got: %v", err)
+	// The parked older request now succeeds; success mutates no cooldown state.
+	releaseOnce.Do(func() { close(release) })
+	outcome := <-lateDone
+	if outcome.err != nil {
+		t.Fatalf("older request should succeed on its fallback: %v", outcome.err)
 	}
-	if otherFirst.Load() != 1 || otherSecond.Load() != 1 {
-		t.Fatalf("local refusal must not hit upstream, counts are %d/%d", otherFirst.Load(), otherSecond.Load())
+	if path == "stream" {
+		drainAntigravityStream(t, outcome.stream)
+	}
+	if lateThrottled.Load() != 1 || served.Load() != 1 {
+		t.Fatalf("unexpected older-request endpoint counts: %d/%d", lateThrottled.Load(), served.Load())
+	}
+
+	// The newer same-key cooldown must have survived the older success.
+	if err := runAntigravityCooldownPath(t, path, e, auth, req, opts); err == nil || !strings.Contains(err.Error(), "short cooldown") {
+		t.Fatalf("expected local short-cooldown refusal after the older success, got: %v", err)
+	}
+	if bFirst.Load() != 1 || bSecond.Load() != 1 || lateThrottled.Load() != 1 || served.Load() != 1 {
+		t.Fatalf("local refusal must not hit upstream, counts are late=%d served=%d bFirst=%d bSecond=%d", lateThrottled.Load(), served.Load(), bFirst.Load(), bSecond.Load())
 	}
 }
 
