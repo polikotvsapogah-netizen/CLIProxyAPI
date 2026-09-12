@@ -430,19 +430,34 @@ func runAntigravityLateSuccessSameKeyScenario(t *testing.T, path, model string, 
 		stream *cliproxyexecutor.StreamResult
 		err    error
 	}
-	lateDone := make(chan lateOutcome, 1)
+	lateCtx, cancelLate := context.WithCancel(context.Background())
+	var outcome lateOutcome
+	lateDone := make(chan struct{})
+	// Failure cleanup must unwind the parked older request: cancel it,
+	// release the gated endpoint, join the executor goroutine, and drain
+	// any stream producer so nothing outlives the test. Registered after
+	// the fallback-override cleanup, so LIFO order runs it before the
+	// package globals are restored.
+	t.Cleanup(func() {
+		cancelLate()
+		releaseOnce.Do(func() { close(release) })
+		<-lateDone
+		if outcome.stream != nil {
+			for range outcome.stream.Chunks {
+			}
+		}
+	})
 	go func() {
+		defer close(lateDone)
 		if path == "stream" {
-			result, err := e.ExecuteStream(context.Background(), auth, req, opts)
-			lateDone <- lateOutcome{stream: result, err: err}
+			outcome.stream, outcome.err = e.ExecuteStream(lateCtx, auth, req, opts)
 			return
 		}
-		_, err := e.Execute(context.Background(), auth, req, opts)
-		lateDone <- lateOutcome{err: err}
+		_, outcome.err = e.Execute(lateCtx, auth, req, opts)
 	}()
 	select {
 	case <-entered: // the older request saw a short 429 and is parked on its fallback
-	case outcome := <-lateDone:
+	case <-lateDone:
 		t.Fatalf("older request finished before reaching the fallback endpoint: %v", outcome.err)
 	}
 
@@ -467,7 +482,7 @@ func runAntigravityLateSuccessSameKeyScenario(t *testing.T, path, model string, 
 
 	// The parked older request now succeeds; success mutates no cooldown state.
 	releaseOnce.Do(func() { close(release) })
-	outcome := <-lateDone
+	<-lateDone
 	if outcome.err != nil {
 		t.Fatalf("older request should succeed on its fallback: %v", outcome.err)
 	}
